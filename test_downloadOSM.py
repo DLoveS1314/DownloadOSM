@@ -38,47 +38,65 @@ class TestClassifyFeature(unittest.TestCase):
 
     def test_motorway(self):
         row = {"highway": "motorway", "railway": None}
-        self.assertEqual(downloadOSM.classify_feature(row), "高速")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_EXPRESSWAY)
 
     def test_trunk_link(self):
         row = {"highway": "trunk_link", "railway": None}
-        self.assertEqual(downloadOSM.classify_feature(row), "高速")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_EXPRESSWAY)
 
     def test_primary(self):
         row = {"highway": "primary", "railway": None}
-        self.assertEqual(downloadOSM.classify_feature(row), "主要道路")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_MAIN_ROAD)
 
     def test_secondary_link(self):
         row = {"highway": "secondary_link", "railway": None}
-        self.assertEqual(downloadOSM.classify_feature(row), "主要道路")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_MAIN_ROAD)
 
     def test_residential(self):
-        row = {"highway": "residential", "railway": None}
-        self.assertEqual(downloadOSM.classify_feature(row), "次要道路")
+        row = {"highway": "residential", "railway": None, "name": "Test Road"}
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_MINOR_ROAD)
+
+    def test_unnamed_residential_goes_to_minor_roads(self):
+        row = {"highway": "residential", "railway": None, "name": None}
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_MINOR_ROAD)
+
+    def test_named_service_goes_to_minor_roads(self):
+        row = {"highway": "service", "railway": None, "name": "Service Road"}
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_MINOR_ROAD)
+
+    def test_unnamed_service_goes_to_minor_roads(self):
+        row = {"highway": "service", "railway": None, "name": None}
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_MINOR_ROAD)
+
+    def test_path_like_roads_go_to_other_roads(self):
+        for highway in ["footway", "path", "track", "road"]:
+            with self.subTest(highway=highway):
+                row = {"highway": highway, "railway": None, "name": "Park path"}
+                self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_OTHER_ROAD)
 
     def test_subway(self):
         row = {"highway": None, "railway": "subway"}
-        self.assertEqual(downloadOSM.classify_feature(row), "地铁")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_SUBWAY)
 
     def test_rail(self):
         row = {"highway": None, "railway": "rail"}
-        self.assertEqual(downloadOSM.classify_feature(row), "铁路")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_RAILWAY)
 
     def test_light_rail(self):
         row = {"highway": None, "railway": "light_rail"}
-        self.assertEqual(downloadOSM.classify_feature(row), "轻轨")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_LIGHT_RAIL)
 
     def test_tram(self):
         row = {"highway": None, "railway": "tram"}
-        self.assertEqual(downloadOSM.classify_feature(row), "轻轨")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_LIGHT_RAIL)
 
     def test_unknown_road_fallback(self):
         row = {"highway": None, "railway": None}
-        self.assertEqual(downloadOSM.classify_feature(row), "次要道路")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_OTHER_ROAD)
 
     def test_list_highway_value(self):
         row = {"highway": ["motorway"], "railway": None}
-        self.assertEqual(downloadOSM.classify_feature(row), "高速")
+        self.assertEqual(downloadOSM.classify_feature(row), downloadOSM.CLASS_EXPRESSWAY)
 
 
 class TestSafeFilename(unittest.TestCase):
@@ -108,6 +126,7 @@ class TestDownloadOsmNetworkByBBox(unittest.TestCase):
         mock_gdf = gpd.GeoDataFrame({
             "highway": ["motorway", "residential"],
             "railway": [None, None],
+            "name": [None, "Test Road"],
             "geometry": [
                 LineString([(116.1, 39.1), (116.2, 39.2)]),
                 LineString([(116.3, 39.3), (116.4, 39.4)]),
@@ -140,7 +159,11 @@ class TestExportByClassToGeojson(unittest.TestCase):
     @patch('downloadOSM.gpd.GeoDataFrame.to_file')
     def test_export_success(self, mock_to_file, mock_makedirs):
         gdf = gpd.GeoDataFrame({
-            "osm_class": ["高速", "高速", "铁路"],
+            "osm_class": [
+                downloadOSM.CLASS_EXPRESSWAY,
+                downloadOSM.CLASS_EXPRESSWAY,
+                downloadOSM.CLASS_RAILWAY,
+            ],
             "geometry": [LineString([(0, 0), (1, 1)]), LineString([(2, 2), (3, 3)]), LineString([(4, 4), (5, 5)])]
         }, geometry="geometry", crs="EPSG:4326")
 
@@ -148,6 +171,23 @@ class TestExportByClassToGeojson(unittest.TestCase):
 
         self.assertEqual(mock_makedirs.call_count, 1)
         self.assertEqual(mock_to_file.call_count, 3)
+        output_paths = [call.args[0] for call in mock_to_file.call_args_list]
+        self.assertIn(os.path.join("output", "test_area", "test_area_\u5168\u90e8\u8def\u7f51.geojson"), output_paths)
+        self.assertIn(os.path.join("output", "test_area", "test_area_\u9ad8\u901f.geojson"), output_paths)
+        self.assertIn(os.path.join("output", "test_area", "test_area_\u94c1\u8def.geojson"), output_paths)
+
+    @patch('downloadOSM.os.makedirs')
+    @patch('downloadOSM.gpd.GeoDataFrame.to_file')
+    def test_export_other_roads_with_chinese_filename(self, mock_to_file, mock_makedirs):
+        gdf = gpd.GeoDataFrame({
+            "osm_class": [downloadOSM.CLASS_OTHER_ROAD],
+            "geometry": [LineString([(0, 0), (1, 1)])]
+        }, geometry="geometry", crs="EPSG:4326")
+
+        downloadOSM.export_by_class_to_geojson(gdf, "test_area", "output")
+
+        output_paths = [call.args[0] for call in mock_to_file.call_args_list]
+        self.assertIn(os.path.join("output", "test_area", "test_area_\u5176\u4ed6\u9053\u8def.geojson"), output_paths)
 
     def test_export_empty_gdf(self):
         gdf = gpd.GeoDataFrame(columns=["osm_class", "geometry"], geometry="geometry", crs="EPSG:4326")
@@ -161,6 +201,77 @@ class TestExportByClassToGeojson(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             downloadOSM.export_by_class_to_geojson(gdf, "test_area", "output")
+
+
+class TestExportBboxToGeojson(unittest.TestCase):
+    @patch('downloadOSM.os.makedirs')
+    @patch('downloadOSM.gpd.GeoDataFrame.to_file')
+    def test_export_bbox_uses_chinese_filename(self, mock_to_file, mock_makedirs):
+        downloadOSM.export_bbox_to_geojson(
+            area_name="test_area",
+            min_lon=116.0,
+            min_lat=39.0,
+            max_lon=117.0,
+            max_lat=40.0,
+            output_dir="output",
+        )
+
+        self.assertEqual(
+            mock_to_file.call_args.args[0],
+            os.path.join("output", "test_area", "test_area_\u7f51\u683c\u8303\u56f4.geojson"),
+        )
+
+
+class TestCleanRouteNetwork(unittest.TestCase):
+    def test_remove_dead_end_segments_applies_to_all_classes(self):
+        gdf = gpd.GeoDataFrame({
+            "osm_class": [
+                downloadOSM.CLASS_MAIN_ROAD,
+                downloadOSM.CLASS_MAIN_ROAD,
+                downloadOSM.CLASS_EXPRESSWAY,
+            ],
+            "geometry": [
+                LineString([(0, 0), (100, 0)]),
+                LineString([(100, 0), (200, 0)]),
+                LineString([(100, 0), (100, 10)]),
+            ],
+        }, geometry="geometry", crs="EPSG:3857")
+
+        result = downloadOSM.remove_dead_end_segments(
+            gdf,
+            node_snap_tolerance_m=0.01,
+            dead_end_max_length_m=20,
+        )
+
+        self.assertEqual(len(result), 2)
+        self.assertNotIn(downloadOSM.CLASS_EXPRESSWAY, set(result["osm_class"]))
+
+    def test_merge_nearby_underground_return_lines_keeps_best_route(self):
+        gdf = gpd.GeoDataFrame({
+            "osm_class": [
+                downloadOSM.CLASS_SUBWAY,
+                downloadOSM.CLASS_SUBWAY,
+                downloadOSM.CLASS_MAIN_ROAD,
+            ],
+            "name": ["Line A", None, "Surface road"],
+            "railway": ["subway", "subway", None],
+            "geometry": [
+                LineString([(0, 0), (50, 0), (100, 0)]),
+                LineString([(0, 5), (100, 5)]),
+                LineString([(0, 2), (100, 2)]),
+            ],
+        }, geometry="geometry", crs="EPSG:3857")
+
+        result = downloadOSM.merge_nearby_underground_return_lines(
+            gdf,
+            parallel_tolerance_m=8,
+        )
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual((result["osm_class"] == downloadOSM.CLASS_SUBWAY).sum(), 1)
+        self.assertEqual((result["osm_class"] == downloadOSM.CLASS_MAIN_ROAD).sum(), 1)
+        kept_subway = result[result["osm_class"] == downloadOSM.CLASS_SUBWAY].iloc[0]
+        self.assertEqual(kept_subway["name"], "Line A")
 
 
 if __name__ == "__main__":
