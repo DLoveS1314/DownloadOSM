@@ -111,6 +111,12 @@ CLASS_FILENAME_SUFFIX = {
 }
 
 UNDERGROUND_ROUTE_CLASSES = {CLASS_RAILWAY, CLASS_SUBWAY, CLASS_LIGHT_RAIL}
+DEAD_END_ROAD_CLASSES = {
+    CLASS_EXPRESSWAY,
+    CLASS_MAIN_ROAD,
+    CLASS_MINOR_ROAD,
+    CLASS_OTHER_ROAD,
+}
 
 
 # =========================================================
@@ -269,67 +275,93 @@ def remove_dead_end_segments(
     dead_end_max_length_m: Optional[float] = 80.0,
 ) -> gpd.GeoDataFrame:
     """
-    Remove short dangling line segments from all route classes.
+    Remove short dangling line segments from ordinary road classes.
 
     A dangling segment is an edge whose one endpoint has only one neighbor in
     the snapped line graph. Set dead_end_max_length_m to None to remove every
     dangling edge regardless of length.
+
+    Railway, subway, and light-rail features are kept out of the dead-end graph
+    so they do not affect road connectivity and are not removed by this step.
     """
     if gdf is None or gdf.empty:
         return gdf
 
     original_crs = gdf.crs
     projected = _project_for_meter_operations(extract_linework(gdf))
+    if "osm_class" in projected.columns:
+        road_mask = projected["osm_class"].isin(DEAD_END_ROAD_CLASSES)
+        dead_end_candidates = projected[road_mask].copy()
+        untouched = projected[~road_mask].copy()
+    else:
+        dead_end_candidates = projected
+        untouched = projected.iloc[0:0].copy()
 
     segment_rows = []
 
-    for _, row in projected.iterrows():
+    for _, row in dead_end_candidates.iterrows():
         geometry = row.geometry
         if geometry is None or geometry.is_empty or geometry.geom_type != "LineString":
             continue
 
         coords = list(geometry.coords)
-        for coord_index in range(len(coords) - 1):
-            start = coords[coord_index]
-            end = coords[coord_index + 1]
-            if start == end:
-                continue
+        if len(coords) < 2:
+            continue
 
-            start_key = _node_key(start, node_snap_tolerance_m)
-            end_key = _node_key(end, node_snap_tolerance_m)
-            if start_key == end_key:
-                continue
+        # 收集所有顶点的 key，用于连接关系计算
+        node_keys = []
+        for coord in coords:
+            node_key = _node_key(coord, node_snap_tolerance_m)
+            if node_keys and node_keys[-1] == node_key:
+                continue  # 跳过重复的点
+            node_keys.append(node_key)
+        
+        if len(node_keys) < 2:
+            continue
 
-            segment = LineString([start, end])
-            edge_id = len(segment_rows)
-            segment_rows.append({
-                "row": row,
-                "geometry": segment,
-                "start": start_key,
-                "end": end_key,
-                "length": segment.length,
-            })
+        segment_rows.append({
+            "row": row,
+            "geometry": geometry,
+            "node_keys": node_keys,
+            "length": geometry.length,
+        })
 
     if not segment_rows:
-        return gpd.GeoDataFrame(columns=gdf.columns, geometry="geometry", crs=original_crs)
+        cleaned = untouched.copy()
+        if cleaned.empty:
+            return gpd.GeoDataFrame(columns=gdf.columns, geometry="geometry", crs=original_crs)
+        if original_crs is not None:
+            cleaned = cleaned.to_crs(original_crs)
+        return cleaned.reset_index(drop=True)
 
     active = set(range(len(segment_rows)))
 
     while True:
+        # 计算所有节点的度数：所有线段上的所有顶点都参与计算
         degree = defaultdict(int)
         for edge_id in active:
             segment = segment_rows[edge_id]
-            degree[segment["start"]] += 1
-            degree[segment["end"]] += 1
+            # 为这条线段的所有顶点增加度数
+            # 使用集合避免同一条线段内的重复顶点
+            unique_node_keys = set(segment["node_keys"])
+            for node_key in unique_node_keys:
+                degree[node_key] += 1
 
         to_remove = set()
         for edge_id in active:
             segment = segment_rows[edge_id]
-            is_dangling = degree[segment["start"]] <= 1 or degree[segment["end"]] <= 1
+            # 检查这条线段是否是断头路：只要有一个顶点的度数为1，并且足够短
+            is_dangling = False
+            for node_key in segment["node_keys"]:
+                if degree[node_key] <= 1:
+                    is_dangling = True
+                    break
+            
             is_short_enough = (
                 dead_end_max_length_m is None
                 or segment["length"] <= dead_end_max_length_m
             )
+            
             if is_dangling and is_short_enough:
                 to_remove.add(edge_id)
 
@@ -340,14 +372,18 @@ def remove_dead_end_segments(
 
     cleaned_rows = []
     for edge_id in sorted(active):
-        original_row = segment_rows[edge_id]["row"].copy()
-        original_row.geometry = segment_rows[edge_id]["geometry"]
-        cleaned_rows.append(original_row)
+        cleaned_rows.append(segment_rows[edge_id]["row"].copy())
 
-    if not cleaned_rows:
+    cleaned_parts = []
+    if cleaned_rows:
+        cleaned_parts.append(gpd.GeoDataFrame(cleaned_rows, geometry="geometry", crs=projected.crs))
+    if not untouched.empty:
+        cleaned_parts.append(untouched.copy())
+
+    if not cleaned_parts:
         return gpd.GeoDataFrame(columns=gdf.columns, geometry="geometry", crs=original_crs)
 
-    cleaned = gpd.GeoDataFrame(cleaned_rows, geometry="geometry", crs=projected.crs)
+    cleaned = gpd.GeoDataFrame(pd.concat(cleaned_parts, ignore_index=True), geometry="geometry", crs=projected.crs)
     if original_crs is not None:
         cleaned = cleaned.to_crs(original_crs)
     return cleaned.reset_index(drop=True)
@@ -488,7 +524,7 @@ def clean_route_network(
     """
     Clean downloaded route linework.
 
-    1. Remove dangling segments for every road/rail class.
+    1. Remove dangling segments for ordinary road classes only.
     2. Merge near duplicate subway/light-rail/railway return lines by keeping
        the best-quality representative.
     """
@@ -842,8 +878,7 @@ def batch_process_from_csv(
             print(f"[等待] {sleep_seconds:g} 秒后继续下一个区域")
             time.sleep(sleep_seconds)
 
-[116.2475,39.97704]
-[116.295524,40.016667]
+ 
 # =========================================================
 # 7. 程序入口
 # =========================================================
@@ -851,7 +886,7 @@ def batch_process_from_csv(
 if __name__ == "__main__":
     # 可按需修改
     CSV_PATH = "input/areas.csv"
-    OUTPUT_DIR = "output1_20260515"
+    OUTPUT_DIR = "output1_20260516"
 
     # OSMnx 设置
     ox.settings.use_cache = True

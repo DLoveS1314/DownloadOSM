@@ -223,7 +223,7 @@ class TestExportBboxToGeojson(unittest.TestCase):
 
 
 class TestCleanRouteNetwork(unittest.TestCase):
-    def test_remove_dead_end_segments_applies_to_all_classes(self):
+    def test_remove_dead_end_segments_applies_to_ordinary_road_classes(self):
         gdf = gpd.GeoDataFrame({
             "osm_class": [
                 downloadOSM.CLASS_MAIN_ROAD,
@@ -245,6 +245,33 @@ class TestCleanRouteNetwork(unittest.TestCase):
 
         self.assertEqual(len(result), 2)
         self.assertNotIn(downloadOSM.CLASS_EXPRESSWAY, set(result["osm_class"]))
+
+    def test_remove_dead_end_segments_ignores_rail_classes(self):
+        gdf = gpd.GeoDataFrame({
+            "osm_class": [
+                downloadOSM.CLASS_MAIN_ROAD,
+                downloadOSM.CLASS_SUBWAY,
+                downloadOSM.CLASS_RAILWAY,
+                downloadOSM.CLASS_LIGHT_RAIL,
+            ],
+            "geometry": [
+                LineString([(0, 0), (10, 0)]),
+                LineString([(-10, 0), (0, 0)]),
+                LineString([(10, 0), (20, 0)]),
+                LineString([(0, 5), (10, 5)]),
+            ],
+        }, geometry="geometry", crs="EPSG:3857")
+
+        result = downloadOSM.remove_dead_end_segments(
+            gdf,
+            node_snap_tolerance_m=0.01,
+            dead_end_max_length_m=20,
+        )
+
+        self.assertNotIn(downloadOSM.CLASS_MAIN_ROAD, set(result["osm_class"]))
+        self.assertIn(downloadOSM.CLASS_SUBWAY, set(result["osm_class"]))
+        self.assertIn(downloadOSM.CLASS_RAILWAY, set(result["osm_class"]))
+        self.assertIn(downloadOSM.CLASS_LIGHT_RAIL, set(result["osm_class"]))
 
     def test_merge_nearby_underground_return_lines_keeps_best_route(self):
         gdf = gpd.GeoDataFrame({
@@ -274,5 +301,31 @@ class TestCleanRouteNetwork(unittest.TestCase):
         self.assertEqual(kept_subway["name"], "Line A")
 
 
+class TestMap10Download(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("RUN_OSM_DOWNLOAD_TESTS") == "1",
+        "set RUN_OSM_DOWNLOAD_TESTS=1 to run live OSM download tests",
+    )
+    def test_download_only_map_10_to_test_directory(self):
+        output_dir = os.path.join(".", "test")
+
+        downloadOSM.process_one_area(
+            area_name="map_10",
+            min_lon=116.2475,
+            min_lat=39.97704,
+            max_lon=116.295524,
+            max_lat=40.016667,
+            output_dir=output_dir,
+        )
+
+        map_10_dir = os.path.join(output_dir, "map_10")
+        all_roads_path = os.path.join(map_10_dir, "map_10_\u5168\u90e8\u8def\u7f51.geojson")
+
+        self.assertTrue(os.path.isdir(map_10_dir))
+        self.assertTrue(os.path.exists(all_roads_path))
+        self.assertFalse(gpd.read_file(all_roads_path).empty)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    TestMap10Download()
+    # unittest.main()
